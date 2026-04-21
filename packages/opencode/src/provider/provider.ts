@@ -1567,7 +1567,7 @@ const layer: Layer.Layer<
             ...model.headers,
           }
 
-        if (model.api.npm === "@ai-sdk/openai-compatible") {
+        if (model.providerID === "openwebui" && model.api.npm === "@ai-sdk/openai-compatible") {
           options["headers"] = {
             ...options["headers"],
             "Accept-Encoding": "identity",
@@ -1588,26 +1588,31 @@ const layer: Layer.Layer<
         const chunkTimeout = options["chunkTimeout"]
         delete options["chunkTimeout"]
 
-        options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
+        options["fetch"] = async (input: RequestInfo, init?: BunFetchRequestInit) => {
           const fetchFn = customFetch ?? fetch
           const opts = init ?? {}
-          const scrub = (raw: string) => {
-            const parsed = JSON.parse(raw)
-            if (!parsed || typeof parsed !== "object") return { body: raw, changed: false }
-            const keys = [
-              "tools",
-              "tool_choice",
-              "parallel_tool_calls",
-              "function_call",
-              "functions",
-              "reasoning_effort",
-              "reasoningEffort",
-            ]
-            const found = keys.filter((k) => k in (parsed as Record<string, unknown>))
-            if (found.length === 0) return { body: raw, changed: false }
-            const clean = { ...(parsed as Record<string, unknown>) }
-            for (const k of found) delete clean[k]
-            return { body: JSON.stringify(clean), changed: true }
+          const scrub = async (raw: unknown) => {
+            if (typeof raw !== "string") return { body: raw, changed: false }
+            return Promise.resolve(raw)
+              .then((x) => JSON.parse(x) as unknown)
+              .then((parsed) => {
+                if (!parsed || typeof parsed !== "object") return { body: raw, changed: false }
+                const keys = [
+                  "tools",
+                  "tool_choice",
+                  "parallel_tool_calls",
+                  "function_call",
+                  "functions",
+                  "reasoning_effort",
+                  "reasoningEffort",
+                ]
+                const found = keys.filter((k) => k in (parsed as Record<string, unknown>))
+                if (found.length === 0) return { body: raw, changed: false }
+                const clean = { ...(parsed as Record<string, unknown>) }
+                for (const k of found) delete clean[k]
+                return { body: JSON.stringify(clean), changed: true }
+              })
+              .catch(() => ({ body: raw, changed: false }))
           }
           const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
           const signals: AbortSignal[] = []
@@ -1620,7 +1625,7 @@ const layer: Layer.Layer<
           const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
           if (combined) opts.signal = combined
 
-          if (model.api.npm === "@ai-sdk/openai-compatible") {
+          if (model.providerID === "openwebui" && model.api.npm === "@ai-sdk/openai-compatible") {
             const fetchCompat = (body?: BodyInit | null) =>
               fetchFn(input, {
                 ...opts,
@@ -1644,13 +1649,13 @@ const layer: Layer.Layer<
                 text.includes("Function tools with reasoning_effort are not supported") &&
                 typeof opts.body === "string"
               ) {
-                const next = scrub(opts.body as string)
+                const next = await scrub(opts.body)
                 if (next.changed) {
                   log.warn(
                     "Open WebUI chat endpoint rejects tools (claims reasoning_effort incompatibility); retrying as normal chat without tools",
                     { modelID: model.api.id, providerID: model.providerID },
                   )
-                  return fetchCompat(next.body)
+                  return typeof next.body === "string" ? fetchCompat(next.body) : initial
                 }
               }
               return new Response(text, {
